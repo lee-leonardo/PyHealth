@@ -289,3 +289,9 @@ It builds two objects:
 .. autoclass:: pyhealth.medcode.ICDToSNOMEDMapper
     :members:
     :show-inheritance:
+
+To roll conditions up to retained ancestors and project the paths into
+per-sample graphs, see
+:doc:`processors/pyhealth.processors.AncestorRollupProcessor` — its
+``from_omop`` factory builds on the vocabulary reader, hierarchy, and mapper
+documented here.
