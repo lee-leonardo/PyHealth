@@ -501,6 +501,36 @@ class TestMapping(unittest.TestCase):
 class TestProjection(unittest.TestCase):
     """Exact projected edges, masks, containers, and empty graphs."""
 
+    def test_graph_embeddings_project_and_batch_with_empty_samples(self):
+        from torch_geometric.data import Batch
+
+        vectors = torch.arange(len(DIAMOND_KG_DOMAINS) * 3).reshape(-1, 3).float()
+        graph = KnowledgeGraph(DIAMOND_KG_TRIPLES, node_features=vectors)
+        _, processor = build_processor(knowledge_graph=graph)
+        changed_graph = KnowledgeGraph(DIAMOND_KG_TRIPLES, node_features=vectors + 1)
+        _, changed = build_processor(knowledge_graph=changed_graph)
+        self.assertNotEqual(processor.fingerprint, changed.fingerprint)
+
+        populated = processor.process(["X"])
+        empty = processor.process(["MISSING"])
+        self.assertTrue(torch.equal(populated.x, vectors[populated.node_ids]))
+        self.assertEqual(tuple(empty.x.shape), (0, 3))
+        batch = Batch.from_data_list([empty, populated])
+        self.assertTrue(torch.equal(batch.x, populated.x))
+        restored = pickle.loads(pickle.dumps(processor))
+        self.assertTrue(torch.equal(restored.process(["X"]).x, populated.x))
+
+    def test_identity_projection_on_ontology_without_edges(self):
+        graph = KnowledgeGraph(
+            triples=[], entity2id={"R": 0}, relation2id={"is_a": 0}
+        )
+        _, processor = build_processor(
+            knowledge_graph=graph, domains={"R": "Condition"}, include_root=True
+        )
+        data = processor.process(["R"])
+        self.assertEqual(data.node_ids.tolist(), [0])
+        self.assertEqual(tuple(data.edge_index.shape), (2, 0))
+
     def test_diamond_x_keeps_both_parent_edges(self):
         values, processor = build_processor()
         data = processor.process(["X"])

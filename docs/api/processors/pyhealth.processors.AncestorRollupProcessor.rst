@@ -9,7 +9,7 @@ a condition hierarchy and projects the successful paths into one
 :class:`torch_geometric.data.Data` graph per sample. Registered as
 ``"ancestor_rollup"`` in the processor registry.
 
-It implements the depth-limited roll-up of KEEP
+It provides a configurable roll-up inspired by KEEP
 (`Elhussein et al., CHIL 2025 <https://arxiv.org/abs/2510.05049>`_, appendix
 A.1.1 and A.4): ICD diagnoses are converted to standard OMOP concepts, the
 concepts are rolled up to eligible SNOMED ancestors within a depth limit of
@@ -27,11 +27,11 @@ Two entry points build the same internal roll-up index:
 - the generic constructor takes a :class:`~pyhealth.graph.KnowledgeGraph`
   whose ``hierarchy_relation`` triples are supplied **parent -> child**, a
   domain mapping, and optionally authoritative root depths and closure pairs;
-- :meth:`~pyhealth.processors.AncestorRollupProcessor.from_omop` derives
-  everything from an :class:`~pyhealth.medcode.OMOPVocabulary`: the uncut
-  SNOMED condition subtree supplies the traversal edges and the
-  ``CONCEPT_ANCESTOR`` minimum separations become the authoritative root
-  depths.
+- :meth:`~pyhealth.processors.AncestorRollupProcessor.from_omop` converts
+  the uncut SNOMED Disease subtree from
+  :class:`~pyhealth.medcode.OMOPVocabulary` to a PyHealth KnowledgeGraph.
+  Its direct edges point parent to child. Minimum ``CONCEPT_ANCESTOR``
+  separations supply the root depths used for target eligibility.
 
 Semantics
 ^^^^^^^^^
@@ -125,9 +125,10 @@ This is the synthetic shape of a real Athena discrepancy: some concepts have
 a standard ancestor at ``CONCEPT_ANCESTOR`` separation one whose
 ``CONCEPT_RELATIONSHIP`` row is missing, because their only "Is a" route
 runs through a valid-but-nonstandard intermediate that every filtered
-hierarchy drops. On such concepts ``path_source="direct"`` reports
-``no_target`` while ``path_source="closure"`` returns the target and flags
-the stitched edge.
+hierarchy drops. For sources beyond the cutoff with no surviving direct
+path, ``path_source="direct"`` reports ``no_target``. If the closure link
+restores a path to an eligible ancestor, ``path_source="closure"`` returns
+the target and flags the stitched edge.
 
 Rolling up ICD diagnoses
 ------------------------
@@ -167,8 +168,33 @@ own result, and converging targets within one event count once:
         # stay distinct, because counting belongs to the task
         print(event_id, [result.source for result in results], sorted(targets))
 
-On the OMOP path, ``node_ids`` carries the integer OMOP ``concept_id`` of
-each projected node, so ``str(node_id)`` decodes it without any lookup.
+Using pretrained node embeddings
+--------------------------------
+
+The graph stores string concept keys and assigns integer entity IDs.
+``Data.node_ids`` carries those IDs in both entry points. Use
+``processor.id2entity[node_id]`` to retrieve the concept key. For a generic
+graph, pass the pretrained feature tensor as ``KnowledgeGraph.node_features``,
+with rows aligned to ``entity2id``. For OMOP, pass the vectors by string
+``concept_id`` and the factory aligns them to the graph.
+
+.. code-block:: python
+
+    import torch
+
+    embedded = AncestorRollupProcessor.from_omop(
+        vocabulary,
+        target_policy="first_retained",
+        include_root=True,
+        node_features_by_code={"4274025": torch.tensor([0.1, 0.2])},
+    )
+    embedded.process(["4274025"]).x  # tensor([[0.1000, 0.2000]])
+
+Use concept keys from your trained embedding artifact in place of the
+illustrative vector. ``Data.x`` contains the rows for the projected nodes,
+with zeros for graph nodes that have no supplied vector. Empty samples keep
+the feature width for batching. Train KEEP embeddings separately using the
+chosen graph vocabulary and patient-history co-occurrences.
 
 API Reference
 -------------

@@ -3,8 +3,8 @@
 #   Maps observed concept codes to retained SNOMED ancestors and projects the
 #   successful paths into one PyG graph per sample. The OMOP vocabulary
 #   adapter (``from_omop``) integrates the reader from PR #2
-#   (``pyhealth.medcode.omop``); the roll-up semantics follow the KEEP
-#   implementation (Elhussein et al., CHIL 2025,
+#   (``pyhealth.medcode.omop``); the roll-up policies are inspired by KEEP
+#   (Elhussein et al., CHIL 2025,
 #   https://arxiv.org/abs/2510.05049) and were rehearsed and validated
 #   against a standalone behavioural reference before this port.
 
@@ -12,10 +12,10 @@
 
 This module provides :class:`AncestorRollupProcessor`, registered as
 ``"ancestor_rollup"`` in the processor registry. It follows eligible
-ancestor paths from each observed code up a hierarchy and emits both an
-ordered mapping (one typed result per input occurrence, for per-event
-attribution) and one PyG :class:`~torch_geometric.data.Data` graph per
-sample showing the paths that explain the roll-up.
+ancestor paths from each observed code up a hierarchy. ``rollup_codes()``
+emits one typed result per input occurrence. ``process()`` projects the
+successful paths into a PyG :class:`~torch_geometric.data.Data` graph per
+sample.
 
 Two entry points build the same internal roll-up index:
 
@@ -23,7 +23,7 @@ Two entry points build the same internal roll-up index:
   :class:`~pyhealth.graph.KnowledgeGraph` (its ``edge_index``,
   ``edge_type`` and ID maps), a domain mapping, and optional authoritative
   root depths;
-- :meth:`AncestorRollupProcessor.from_omop` derives everything from the
+- :meth:`AncestorRollupProcessor.from_omop` builds a KnowledgeGraph from the
   OMOP vocabulary reader of PR #2 (:class:`~pyhealth.medcode.OMOPVocabulary`):
   the uncut SNOMED condition subtree supplies the traversal edges and the
   closure-derived root depths, and the classification universe is every
@@ -119,7 +119,7 @@ _DEPTH_METHOD_BFS = "bfs_edge_distance"
 _DEPTH_METHOD_SUPPLIED = "supplied_root_depths"
 
 #: Version tag embedded in the fingerprint so scheme changes are visible.
-_FINGERPRINT_SCHEMA = "pyhealth.ancestor_rollup_processor/1"
+_FINGERPRINT_SCHEMA = "pyhealth.ancestor_rollup_processor/2"
 
 
 # --- internal validation helpers ---------------------------------------------
@@ -283,7 +283,9 @@ def _validated_pairs(pairs: Any, name: str) -> frozenset[tuple[str, str]]:
     return frozenset(edge_set)
 
 
-def _reject_cycles(nodes: dict[str, str], children: dict[str, tuple], parents: dict) -> None:
+def _reject_cycles(
+    nodes: dict[str, str], children: dict[str, tuple], parents: dict
+) -> None:
     """Kahn's algorithm over every node; reject cycles anywhere in the graph."""
     indegree = {code: len(parents.get(code, ())) for code in nodes}
     queue = deque(sorted(code for code, degree in indegree.items() if degree == 0))
@@ -438,19 +440,6 @@ def _collect_targets_and_edges(
         (parent, child) for child, parent in expansions if parent in productive
     )
     return targets, edges
-
-
-def _empty_data() -> Data:
-    """The consistently shaped empty graph: every field present, zero-sized."""
-    return Data(
-        x=torch.zeros(0, 1),
-        edge_index=torch.zeros(2, 0, dtype=torch.long),
-        edge_type=torch.zeros(0, dtype=torch.long),
-        node_ids=torch.zeros(0, dtype=torch.long),
-        seed_mask=torch.zeros(0, dtype=torch.bool),
-        target_mask=torch.zeros(0, dtype=torch.bool),
-        closure_only=torch.zeros(0, dtype=torch.bool),
-    )
 
 
 @register_processor("ancestor_rollup")
@@ -616,8 +605,6 @@ class AncestorRollupProcessor(FeatureProcessor):
                 f"hierarchy_relation {self.hierarchy_relation!r} is not a "
                 f"relation of the knowledge graph"
             )
-        relation_id = int(knowledge_graph.relation2id[self.hierarchy_relation])
-
         _require_mapping(domain_by_code, "domain_by_code")
         for code, domain in domain_by_code.items():
             _require_nonempty_str(code, "domain_by_code key")
@@ -633,26 +620,8 @@ class AncestorRollupProcessor(FeatureProcessor):
             for entity in knowledge_graph.entity2id
         }
 
-        id2entity = {
-            int(entity_id): code
-            for code, entity_id in knowledge_graph.entity2id.items()
-        }
-        heads = knowledge_graph.edge_index[0].tolist()
-        tails = knowledge_graph.edge_index[1].tolist()
-        relations = knowledge_graph.edge_type.tolist()
-        direct_edges = [
-            (id2entity[int(head)], id2entity[int(tail)])
-            for head, tail, relation in zip(heads, tails, relations)
-            if int(relation) == relation_id
-        ]
-        entity2id = {
-            code: int(entity_id)
-            for code, entity_id in knowledge_graph.entity2id.items()
-        }
-
         self._initialize(
             nodes=nodes,
-            direct_edges=direct_edges,
             closure_pairs=closure_pairs,
             config=_RollupConfig(
                 root=root,
@@ -663,11 +632,9 @@ class AncestorRollupProcessor(FeatureProcessor):
                 path_source=path_source,
             ),
             root_depths=root_depths,
-            entity2id=entity2id,
-            relation_id=relation_id,
             loader_provenance={
                 "hierarchy_relation": self.hierarchy_relation,
-                "knowledge_graph_entities": str(len(entity2id)),
+                "knowledge_graph_entities": str(len(knowledge_graph.entity2id)),
             },
         )
 
@@ -683,11 +650,11 @@ class AncestorRollupProcessor(FeatureProcessor):
         max_depth: int = 5,
         on_unmapped: str = "error",
         path_source: str = "direct",
+        node_features_by_code: Mapping[str, torch.Tensor] | None = None,
     ) -> AncestorRollupProcessor:
         """Builds a processor from the OMOP vocabulary (PR #2 adapter).
 
-        Data and vocabulary semantics live with the peer's reader; policy
-        and roll-up semantics live with this configuration. The uncut
+        The vocabulary supplies concept metadata and relationships. The uncut
         SNOMED condition subtree (``condition_hierarchy(max_depth=None,
         depth_measure="min")``, rooted at Disease, concept 4274025) supplies
         the traversal edges and the closure-derived root depths, which are
@@ -695,15 +662,16 @@ class AncestorRollupProcessor(FeatureProcessor):
         ``max_depth`` then governs *target eligibility* over that uncut
         subtree, so deep sources and intermediates stay traversable — the
         same number as the hierarchy's build-time cutoff, but a different
-        layer.
+        layer. For the embedding stage, choose the training vocabulary
+        explicitly and supply trained vectors by concept code for projection.
 
         The classification universe is every valid standard SNOMED concept
         with its domain, so ``unknown_code`` (not a valid standard SNOMED
         concept), ``outside_domain`` (SNOMED concept outside ``Condition``)
         and ``unreachable`` (Condition concept outside the Disease subtree)
         stay distinct. Concept codes are OMOP ``concept_id`` strings at the
-        processor boundary; use ``str(concept_id)`` and convert back with
-        ``str(node_id)``, since ``node_ids`` carries the integer concept ids.
+        processor boundary. Decode projected ``node_ids`` through the graph's
+        ``id2entity`` lookup.
 
         Orphan-rescue shortcuts (the reader's ``connect_orphans`` edges) are
         *not* used: the baseline builds paths from the direct ``Is a`` rows
@@ -722,11 +690,13 @@ class AncestorRollupProcessor(FeatureProcessor):
             on_unmapped: ``"error"`` or ``"empty"``. Default ``"error"``.
             path_source: ``"direct"`` or ``"closure"``; see the class
                 documentation.
+            node_features_by_code: Optional pretrained vectors keyed by the
+                string OMOP concept ID. Vectors must share a shape, dtype
+                and device. Traversal entities without vectors receive zeros.
 
         Returns:
-            A configured :class:`AncestorRollupProcessor` whose
-            ``knowledge_graph`` is ``None`` (the hierarchy is read directly
-            from the vocabulary, not through a KnowledgeGraph).
+            A configured :class:`AncestorRollupProcessor` with a
+            KnowledgeGraph over the uncut Disease subtree.
 
         Raises:
             TypeError: ``vocabulary`` is not an
@@ -747,6 +717,7 @@ class AncestorRollupProcessor(FeatureProcessor):
             >>> processor.rollup_codes([str(concept_ids[0])])  # doctest: +SKIP
             [RollupResult(source='4140231', targets=('4140231',), ...)]
         """
+        from pyhealth.graph import KnowledgeGraph
         from pyhealth.medcode import OMOPVocabulary
 
         if not isinstance(vocabulary, OMOPVocabulary):
@@ -811,12 +782,43 @@ class AncestorRollupProcessor(FeatureProcessor):
                 "concept_id", "depth"
             ).iter_rows()
         }
+        # Explicit IDs retain concepts whose incoming edges were filtered out.
+        entity2id = {code: index for index, code in enumerate(sorted(root_depths))}
+        node_features = None
+        if node_features_by_code is not None:
+            _require_mapping(node_features_by_code, "node_features_by_code")
+            for code, vector in node_features_by_code.items():
+                if code not in entity2id:
+                    raise ValueError(
+                        f"Node features supplied for unknown entity {code!r}"
+                    )
+                if not isinstance(vector, torch.Tensor) or vector.ndim != 1:
+                    raise ValueError(
+                        "Each node feature must be a one-dimensional tensor"
+                    )
+                if node_features is None:
+                    node_features = vector.new_zeros(len(entity2id), vector.numel())
+                if (
+                    vector.shape != node_features.shape[1:]
+                    or vector.dtype != node_features.dtype
+                    or vector.device != node_features.device
+                ):
+                    raise ValueError(
+                        "Node features must share a shape, dtype and device"
+                    )
+                node_features[entity2id[code]] = vector.detach()
+        relation = OMOP_HIERARCHY_RELATION
+        knowledge_graph = KnowledgeGraph(
+            triples=[(parent, relation, child) for parent, child in direct_edges],
+            entity2id=entity2id,
+            relation2id={relation: 0},
+            node_features=node_features,
+        )
         processor = cls.__new__(cls)
-        processor.knowledge_graph = None
-        processor.hierarchy_relation = OMOP_HIERARCHY_RELATION
+        processor.knowledge_graph = knowledge_graph
+        processor.hierarchy_relation = relation
         processor._initialize(
             nodes=nodes,
-            direct_edges=direct_edges,
             closure_pairs=closure_pairs,
             config=_RollupConfig(
                 root=root,
@@ -827,8 +829,6 @@ class AncestorRollupProcessor(FeatureProcessor):
                 path_source=path_source,
             ),
             root_depths=root_depths,
-            entity2id={code: int(code) for code in nodes},
-            relation_id=0,
             loader_provenance={
                 "hierarchy_relation": OMOP_HIERARCHY_RELATION,
                 "vocabulary_source": "pyhealth.medcode.OMOPVocabulary",
@@ -846,12 +846,9 @@ class AncestorRollupProcessor(FeatureProcessor):
         self,
         *,
         nodes: Mapping[str, Mapping[str, str]],
-        direct_edges: Iterable[tuple[str, str]],
         closure_pairs: Iterable[tuple[str, str]] | None,
         config: _RollupConfig,
         root_depths: Mapping[str, int] | None,
-        entity2id: Mapping[str, int],
-        relation_id: int,
         loader_provenance: Mapping[str, str],
     ) -> None:
         """Validates inputs and builds the internal roll-up index.
@@ -873,7 +870,21 @@ class AncestorRollupProcessor(FeatureProcessor):
                 metadata["domain_id"], f"domain_id for node {code!r}"
             )
 
-        direct = _validated_pairs(direct_edges, "hierarchy edges")
+        graph = self.knowledge_graph
+        entity2id = {
+            code: int(entity_id) for code, entity_id in graph.entity2id.items()
+        }
+        id2entity = {entity_id: code for code, entity_id in entity2id.items()}
+        relation_id = int(graph.relation2id[self.hierarchy_relation])
+        heads, tails = graph.edge_index.tolist()
+        direct = _validated_pairs(
+            (
+                (id2entity[head], id2entity[tail])
+                for head, tail, relation in zip(heads, tails, graph.edge_type.tolist())
+                if relation == relation_id
+            ),
+            "hierarchy edges",
+        )
         if config.path_source == "closure":
             if closure_pairs is None:
                 raise ValueError(
@@ -1000,9 +1011,11 @@ class AncestorRollupProcessor(FeatureProcessor):
         self._edges = frozenset(selected)
         self._closure_only = frozenset(closure_only)
         self._supplied_depths = supplied
-        self._entity2id = dict(entity2id)
-        self._id2entity = {entity_id: code for code, entity_id in entity2id.items()}
-        self._relation_id = int(relation_id)
+        self._entity2id = entity2id
+        self._id2entity = id2entity
+        self._relation_id = relation_id
+        features = getattr(graph, "node_features", None)
+        self._node_features = None if features is None else features.detach().clone()
         self._provenance = provenance
         self._fingerprint = self._compute_fingerprint()
 
@@ -1086,10 +1099,9 @@ class AncestorRollupProcessor(FeatureProcessor):
         The returned :class:`~torch_geometric.data.Data` carries
         ``edge_index`` (shape ``[2, E]``, local node indices, edges pointing
         parent -> child), ``edge_type`` (the hierarchy relation's id),
-        ``node_ids`` (global entity ids: the KnowledgeGraph's on the generic
-        path, the integer OMOP ``concept_id`` on the OMOP path — decode with
-        ``str(node_id)`` or the graph's ``id2entity``), ``x``
-        (``torch.zeros(N, 1)``), ``seed_mask`` (mapped observed codes),
+        ``node_ids`` (global KnowledgeGraph entity IDs, decoded with
+        ``id2entity``), ``x`` (aligned graph node features or
+        ``torch.zeros(N, 1)``), ``seed_mask`` (mapped observed codes),
         ``target_mask`` (emitted targets, identity mappings included) and
         the edge-aligned ``closure_only`` mask (True for edges that exist
         only in the closure). Use :meth:`rollup_codes` for the ordered
@@ -1127,12 +1139,19 @@ class AncestorRollupProcessor(FeatureProcessor):
         node_codes = sorted(
             seeds | targets | {code for edge in edges for code in edge}
         )
-        if not node_codes:
-            return _empty_data()
         local = {code: position for position, code in enumerate(node_codes)}
         edge_pairs = sorted(edges)
+        node_ids = torch.tensor(
+            [self._entity2id[code] for code in node_codes], dtype=torch.long
+        )
+        features = self._node_features
+        x = (
+            torch.zeros(len(node_codes), 1)
+            if features is None
+            else features.index_select(0, node_ids.to(features.device))
+        )
         return Data(
-            x=torch.zeros(len(node_codes), 1),
+            x=x,
             edge_index=torch.tensor(
                 [
                     [local[parent] for parent, _ in edge_pairs],
@@ -1143,9 +1162,7 @@ class AncestorRollupProcessor(FeatureProcessor):
             edge_type=torch.full(
                 (len(edge_pairs),), self._relation_id, dtype=torch.long
             ),
-            node_ids=torch.tensor(
-                [self._entity2id[code] for code in node_codes], dtype=torch.long
-            ),
+            node_ids=node_ids,
             seed_mask=torch.tensor(
                 [code in seeds for code in node_codes], dtype=torch.bool
             ),
@@ -1174,9 +1191,8 @@ class AncestorRollupProcessor(FeatureProcessor):
     def fingerprint(self) -> str:
         """Stable hierarchy-and-configuration digest (SHA-256 hex).
 
-        Covers every semantic input: the selected hierarchy edges with their
-        provenance (direct vs closure-only), entity domains, configuration,
-        depth method, path source, and supplied depths. Two processors
+        Covers selected hierarchy edges and provenance, entity and relation
+        IDs, node features, domains, configuration and supplied depths. Two processors
         built from the same inputs share a fingerprint, so configured task
         schemas can distinguish different graphs of the same size.
         """
@@ -1295,7 +1311,7 @@ class AncestorRollupProcessor(FeatureProcessor):
         """Hashes every semantic input into one stable digest."""
         lines = [
             _FINGERPRINT_SCHEMA,
-            f"relation {self.hierarchy_relation}",
+            f"relation {self.hierarchy_relation} {self._relation_id}",
             f"root {self._config.root}",
             f"policy {self._config.target_policy}",
             f"include_root {self._config.include_root}",
@@ -1308,7 +1324,7 @@ class AncestorRollupProcessor(FeatureProcessor):
             f"closure_only_edges {len(self._closure_only)}",
         ]
         lines.extend(
-            f"node {code} {self._domain_by_code[code]}"
+            f"node {code} {self._domain_by_code[code]} {self._entity2id.get(code)}"
             for code in sorted(self._domain_by_code)
         )
         lines.extend(
@@ -1323,4 +1339,12 @@ class AncestorRollupProcessor(FeatureProcessor):
                 f"depth {code} {self._supplied_depths[code]}"
                 for code in sorted(self._supplied_depths)
             )
-        return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+        digest = hashlib.sha256("\n".join(lines).encode("utf-8"))
+        features = self._node_features
+        if features is not None:
+            digest.update(
+                f"\nfeatures {features.dtype} {tuple(features.shape)}\n".encode()
+            )
+            feature_bytes = features.cpu().contiguous().view(torch.uint8).numpy()
+            digest.update(feature_bytes)
+        return digest.hexdigest()
