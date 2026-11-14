@@ -39,6 +39,9 @@ import unittest
 from collections import defaultdict
 from pathlib import Path
 
+import torch
+
+from pyhealth.graph import KnowledgeGraph
 from pyhealth.medcode import DISEASE_CONCEPT_ID, OMOPVocabulary
 from pyhealth.processors import AncestorRollupProcessor
 
@@ -281,12 +284,12 @@ class TestFromOmopClassification(_AthenaRollupFixture):
         # by identity rather than rolling it up.
         self.assertEqual(self.reason(processor, "1075201"), "retained")
 
-    def test_no_knowledge_graph_on_the_omop_path(self):
-        self.assertIsNone(self.direct.knowledge_graph)
-        # node_ids carry the integer OMOP concept ids, decoded by str()
-        self.assertEqual(
-            self.direct.id2entity[102], "102"
-        )
+    def test_knowledge_graph_keeps_deep_and_isolated_entities(self):
+        graph = self.direct.knowledge_graph
+        self.assertIsInstance(graph, KnowledgeGraph)
+        for code in ("102", "103", "105", "1075201"):
+            self.assertEqual(self.direct.id2entity[graph.entity2id[code]], code)
+        self.assertNotIn("300", graph.entity2id)
 
     def test_provenance_records_the_omop_facts(self):
         provenance = dict(self.direct.provenance)
@@ -344,12 +347,13 @@ class TestPathSourceModes(_AthenaRollupFixture):
     def test_exact_projected_edges_and_closure_only_mask(self):
         data = self.closure.process(["1075201"])
         self.assertEqual(
-            data.node_ids.tolist(), [1075201, 140708, 333]
+            [self.closure.id2entity[node_id] for node_id in data.node_ids.tolist()],
+            ["1075201", "140708", "333"],
         )
         pairs = [
             (
-                str(data.node_ids[int(data.edge_index[0][j])].item()),
-                str(data.node_ids[int(data.edge_index[1][j])].item()),
+                self.closure.id2entity[int(data.node_ids[data.edge_index[0, j]])],
+                self.closure.id2entity[int(data.node_ids[data.edge_index[1, j]])],
             )
             for j in range(data.num_edges)
         ]
@@ -368,10 +372,28 @@ class TestPathSourceModes(_AthenaRollupFixture):
     @unittest.skipUnless(_has_pyg(), "torch-geometric not installed")
     def test_projected_graph_of_a_retained_identity_has_no_edges(self):
         data = self.direct.process(["102"])
-        self.assertEqual(data.node_ids.tolist(), [102])
+        self.assertEqual(
+            data.node_ids.tolist(), [self.direct.knowledge_graph.entity2id["102"]]
+        )
         self.assertEqual(data.num_edges, 0)
         self.assertEqual(data.seed_mask.tolist(), [True])
         self.assertEqual(data.target_mask.tolist(), [True])
+
+    @unittest.skipUnless(_has_pyg(), "torch-geometric not installed")
+    def test_icd_to_graph_embeddings_keeps_untrained_nodes(self):
+        processor = AncestorRollupProcessor.from_omop(
+            self.vocab,
+            target_policy="first_retained",
+            include_root=False,
+            max_depth=3,
+            node_features_by_code={"102": torch.tensor([1.0, 2.0])},
+        )
+        concept_ids = self.vocab.icd_mapper().map("I21A1", version=10)
+        data = processor.process([str(concept_id) for concept_id in concept_ids])
+        codes = [processor.id2entity[node_id] for node_id in data.node_ids.tolist()]
+        self.assertEqual(codes, ["102", "103"])
+        self.assertEqual(data.x.tolist(), [[1.0, 2.0], [0.0, 0.0]])
+        self.assertNotEqual(processor.fingerprint, self.direct.fingerprint)
 
 
 class TestRetainedAncestorParity(_AthenaRollupFixture):
