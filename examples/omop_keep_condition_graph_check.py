@@ -14,9 +14,51 @@ Usage:
         --athena ~/data/athena \\
         --mimic ~/data/mimiciv/3.1
 
-The first run reads the multi-GB Athena files (several minutes) and caches the
+The first run reads the multi-GB Athena files (about a minute) and caches the
 results under --cache; later runs take seconds. Pass --rebuild to ignore the
 cache.
+
+Where these pieces fit in a PyHealth pipeline:
+
+1. Preparation (this script): build the hierarchy and the ICD mapper once from
+   Athena and save them. Everything below loads the saved copies.
+
+2. Task: a ``BaseTask`` maps diagnosis events to concepts while it builds
+   samples, the same way existing tasks call ``CrossMap``::
+
+       from pyhealth.medcode import ICDToSNOMEDMapper, OMOPConditionHierarchy
+       from pyhealth.tasks import BaseTask
+
+       class KEEPConditions(BaseTask):
+           task_name = "keep_conditions"
+           input_schema = {"conditions": "sequence"}
+           output_schema = {}
+
+           def __init__(self, cache="~/.cache/pyhealth/omop_keep"):
+               self.mapper = ICDToSNOMEDMapper.load(f"{cache}/icd_to_snomed.parquet")
+               self.hierarchy = OMOPConditionHierarchy.load(
+                   f"{cache}/hierarchy_min_d6"
+               ).restrict(5)
+
+           def __call__(self, patient):
+               concepts = set()
+               for event in patient.get_events(event_type="diagnoses_icd"):
+                   for concept_id in self.mapper.map(event.icd_code, event.icd_version):
+                       if concept_id in self.hierarchy:
+                           concepts.add(str(concept_id))
+               return [{"patient_id": patient.patient_id,
+                        "conditions": sorted(concepts)}] if concepts else []
+
+   Codes deeper than the cutoff are skipped here; roll-up places them on the
+   graph with ``hierarchy.retained_ancestors()``.
+
+3. Processor: a model that wants a patient subgraph uses PyHealth's "graph"
+   processor on those concept ids::
+
+       input_schema = {"conditions": ("graph", {
+           "knowledge_graph": hierarchy.to_knowledge_graph(),  # parent_to_child
+           "num_hops": 2,
+       })}
 """
 
 import argparse
@@ -25,7 +67,11 @@ from pathlib import Path
 
 import polars as pl
 
-from pyhealth.medcode import ConditionHierarchy, ICDToSNOMEDMapper, OMOPVocabulary
+from pyhealth.medcode import (
+    ICDToSNOMEDMapper,
+    OMOPConditionHierarchy,
+    OMOPVocabulary,
+)
 
 BASE_DEPTH = 6  # deepest graph in the ablation; shallower ones are cut from it
 
@@ -62,7 +108,10 @@ def load_or_build(args: argparse.Namespace):
     mapper_path = cache / "icd_to_snomed.parquet"
     if not args.rebuild and graph_dir.is_dir() and mapper_path.is_file():
         print(f"Using cached graph and mapping in {cache}")
-        return ConditionHierarchy.load(graph_dir), ICDToSNOMEDMapper.load(mapper_path)
+        return (
+            OMOPConditionHierarchy.load(graph_dir),
+            ICDToSNOMEDMapper.load(mapper_path),
+        )
 
     vocab = OMOPVocabulary(args.athena)
     start = time.time()
@@ -77,7 +126,7 @@ def load_or_build(args: argparse.Namespace):
     return hierarchy, mapper
 
 
-def report_graphs(hierarchy: ConditionHierarchy, depths) -> None:
+def report_graphs(hierarchy: OMOPConditionHierarchy, depths) -> None:
     print("\nCondition graph by depth limit (root = Disease, depth 0)")
     print(f"{'measure':>8} {'depth':>5} {'nodes':>8} {'edges':>8} {'rescued':>8}")
     for measure in ("min", "max"):
