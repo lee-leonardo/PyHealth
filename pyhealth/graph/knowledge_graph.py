@@ -90,6 +90,9 @@ class KnowledgeGraph:
         if isinstance(triples, (str, Path)):
             triples = self._load_triples_from_file(triples)
 
+        # Inferring IDs from zero triples would drop all isolated nodes.
+        # For an edgeless graph, supply a nonempty entity map and an
+        # explicit relation map (which can be empty).
         if len(triples) == 0 and (not entity2id or relation2id is None):
             raise ValueError(
                 "triples must be a non-empty list unless explicit entity "

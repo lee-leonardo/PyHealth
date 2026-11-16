@@ -1,4 +1,4 @@
-# Author: lee-leonardo
+# Author: lee-leonardo (NetID: ll37)
 # Description: KEEP depth-limited ancestor roll-up as a PyHealth processor.
 #   Maps observed concept codes to retained SNOMED ancestors and projects the
 #   successful paths into one PyG graph per sample. The OMOP vocabulary
@@ -256,7 +256,11 @@ class _RollupConfig:
 
 
 def _validated_pairs(pairs: Any, name: str) -> frozenset[tuple[str, str]]:
-    """Validates an iterable of ``(parent, child)`` string pairs, deduplicated."""
+    """Deduplicate edge pairs and raise on the first malformed item.
+
+    This runs when constructing the hierarchy index, before any sample is
+    processed. The caller must correct malformed edges before retrying.
+    """
     if isinstance(pairs, (str, bytes)):
         raise TypeError(f"{name} must be an iterable of (parent, child) pairs")
     edge_set = set()
@@ -1184,6 +1188,9 @@ class AncestorRollupProcessor(FeatureProcessor):
         Records the depth method, configuration, path source, edge
         provenance counts, and loader facts, so adapters expose their
         depth/ancestry source as the data inspection requires.
+        The ``schema_version`` entry (``"1"``) versions this processor's
+        provenance fields and their meanings. The OMOP vocabulary release
+        and the fingerprint format are separate version scopes.
         """
         return MappingProxyType(dict(self._provenance))
 
