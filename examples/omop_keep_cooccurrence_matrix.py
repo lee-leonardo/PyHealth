@@ -1,4 +1,4 @@
-# Author: lee-leonardo
+# Author: lee-leonardo (NetID: ll37)
 # Description: Runnable KEEP co-occurrence matrix example on synthetic OMOP
 #   data. Demonstrates the real PyHealth path (OMOPDataset.iter_patients() ->
 #   ICD mapper -> build_keep_omop_ancestor_rollup -> build_keep_cooccurrence)

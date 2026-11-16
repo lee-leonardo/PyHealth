@@ -1,3 +1,5 @@
+.. Author: lee-leonardo (NetID: ll37)
+
 pyhealth.tasks.keep
 ===================
 
@@ -25,6 +27,17 @@ passes the resulting histories to ``task.build_cooccurrence()``. Both
 workflows compute patient presence before calling the sparse matrix
 builder once for the cohort.
 
+The builders accept single-pass iterables of patients or histories.
+``iter_patients()`` uses Polars to collect the unique patient IDs and
+then loads one patient's events at a time. PyHealth's OMOP and MIMIC
+readers cache normalized events, and ``set_task()`` caches MIMIC task
+samples. Configure ``cache_dir`` when constructing the dataset. The
+standalone OMOP example writes synthetic CSVs to exercise those readers.
+If a notebook or ETL job already supplies patient objects or mapped
+history records, pass the iterable directly. Counting needs no files.
+The KEEP wrapper tracks unique patient IDs, and the
+:ref:`sparse counter <patient-cooccurrence>` stores distinct observed pairs.
+
 Configure MIMIC-III with the supplied ``mimic3_keep.yaml`` through
 ``config_path``, or MIMIC-IV with ``mimic4_keep.yaml`` through
 ``ehr_config_path``. Load ``diagnoses_icd`` in the reader; these opt-in
@@ -34,6 +47,8 @@ standard Condition concept mapped from each diagnosis. Its cohort method
 passes those IDs directly to roll-up.
 
 .. code-block:: python
+
+    from functools import partial
 
     from pyhealth.graph.cooccurrence import build_cooccurrence
     from pyhealth.tasks import KeepConditionHistoryTask
@@ -46,10 +61,12 @@ passes those IDs directly to roll-up.
         histories,
         rollup=processor,
         concept_ids=concept_ids,
-        matrix_builder=lambda rows, *, concept_ids: build_cooccurrence(
-            rows, concept_ids=concept_ids
-        ),
+        matrix_builder=partial(build_cooccurrence, device="cpu"),
     )
+
+Use the same ``matrix_builder`` keyword for the OMOP workflow. Select
+``device="cuda:0"`` for a CUDA tensor, or bind a callable through
+``transform`` to return weights derived from counts.
 
 Semantics
 ^^^^^^^^^

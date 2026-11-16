@@ -280,8 +280,8 @@ class KeepCooccurrenceResult:
         >>> import torch
         >>> from pyhealth.tasks import KeepCooccurrenceResult
         >>> matrix = torch.sparse_coo_tensor(
-        ...     torch.tensor([[0, 1], [1, 0]]),
-        ...     torch.tensor([1, 1], dtype=torch.int64),
+        ...     torch.tensor([[0, 0, 1, 1], [0, 1, 0, 1]]),
+        ...     torch.ones(4, dtype=torch.int64),
         ...     (2, 2),
         ... ).coalesce()
         >>> result = KeepCooccurrenceResult(
@@ -299,18 +299,17 @@ class KeepCooccurrenceResult:
         ...     },
         ... )
         >>> result.matrix.to_dense().tolist()
-        [[0, 1], [1, 0]]
+        [[1, 1], [1, 1]]
         >>> result.concept_ids
         ('10', '11')
     """
 
     matrix: torch.Tensor
-    """Sparse, coalesced, CPU COO tensor of ``int64`` patient counts.
+    """Matrix returned by the configured matrix builder.
 
-    Shape ``(V, V)`` for ``V = len(concept_ids)``, or ``(0, 0)`` for an
-    empty vocabulary. Off-diagonal entries are mirrored; the diagonal
-    counts, per retained concept, the patients for whom the concept is
-    present.
+    The default is a sparse, coalesced CPU COO tensor of ``int64`` patient
+    counts. Off-diagonal entries are mirrored, and the diagonal counts
+    patient prevalence. Both axes follow ``concept_ids``.
     """
 
     concept_ids: tuple[str, ...]
@@ -395,12 +394,14 @@ def build_keep_cooccurrence(
             rows and columns.
         matrix_builder: callable that consumes the patient concept sets once
             before returning the sparse matrix with the supplied axes.
+            Use ``functools.partial`` with
+            :func:`~pyhealth.graph.cooccurrence.build_cooccurrence` to set a
+            device or apply a transform to the raw counts.
 
     Returns:
-        A :class:`KeepCooccurrenceResult` with the coalesced CPU COO
-        ``int64`` matrix (shape ``(V, V)``, or ``(0, 0)`` for an empty
-        retained vocabulary, with zeros for an empty cohort), the exact
-        ``concept_ids`` tuple, and the patient/diagnosis/mapping counts.
+        A :class:`KeepCooccurrenceResult` with the matrix of shape ``(V, V)``,
+        where ``V`` is the retained vocabulary size, the exact ``concept_ids``
+        tuple, and the patient, diagnosis, and mapping counts.
 
     Raises:
         TypeError: ``patients`` is not an iterable of patients, an element
