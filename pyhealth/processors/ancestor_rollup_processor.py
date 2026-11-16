@@ -1203,6 +1203,33 @@ class AncestorRollupProcessor(FeatureProcessor):
         """Read-only entity-id-to-code map used to decode ``node_ids``."""
         return MappingProxyType(dict(self._id2entity))
 
+    @property
+    def retained_codes(self) -> frozenset[str]:
+        """Return the immutable set of eligible roll-up target codes.
+
+        These are the Condition concepts whose root depth is at most
+        ``max_depth``. The root is included when ``include_root`` is true.
+
+        Example:
+            >>> from pyhealth.graph import KnowledgeGraph
+            >>> from pyhealth.processors import AncestorRollupProcessor
+            >>> kg = KnowledgeGraph(
+            ...     triples=[("R", "is_a", "A"), ("A", "is_a", "X")]
+            ... )
+            >>> processor = AncestorRollupProcessor(
+            ...     knowledge_graph=kg,
+            ...     domain_by_code={code: "Condition" for code in "RAX"},
+            ...     hierarchy_relation="is_a", root="R",
+            ...     target_policy="first_retained", include_root=False,
+            ...     max_depth=1, on_unmapped="empty",
+            ... )
+            >>> sorted(processor.retained_codes)
+            ['A']
+            >>> processor.rollup_codes(["X"])[0].targets
+            ('A',)
+        """
+        return self._retained
+
     def __repr__(self) -> str:
         return (
             f"AncestorRollupProcessor("

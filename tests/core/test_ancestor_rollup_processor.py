@@ -379,6 +379,26 @@ class TestMapping(unittest.TestCase):
 
     SOURCES: ClassVar = ("X", "Y", "C", "U", "R", "N", "O", "W", "MISSING")
 
+    def test_retained_codes_respect_depth_cutoff_and_root_inclusion(self):
+        _, shallow = build_processor(max_depth=1)
+        self.assertEqual(shallow.retained_codes, frozenset({"A", "B", "U"}))
+
+        _, deeper = build_processor(max_depth=2)
+        self.assertEqual(
+            deeper.retained_codes, frozenset({"A", "B", "C", "D", "U"})
+        )
+
+        _, with_root = build_processor(max_depth=1, include_root=True)
+        self.assertEqual(
+            with_root.retained_codes, frozenset({"R", "A", "B", "U"})
+        )
+
+    def test_retained_codes_are_read_only(self):
+        _, processor = build_processor()
+        self.assertIsInstance(processor.retained_codes, frozenset)
+        with self.assertRaises(AttributeError):
+            processor.retained_codes = {"X"}
+
     def test_diamond_behaviour_matches_the_reference(self):
         _, processor = build_processor()
         results = processor.rollup_codes(self.SOURCES)
