@@ -195,7 +195,10 @@ Use concept keys from your trained embedding artifact in place of the
 illustrative vector. ``Data.x`` contains the rows for the projected nodes,
 with zeros for graph nodes that have no supplied vector. Empty samples keep
 the feature width for batching. Train KEEP embeddings separately using the
-chosen graph vocabulary and patient-history co-occurrences.
+chosen graph vocabulary and patient-history co-occurrences:
+:func:`pyhealth.tasks.keep.build_keep_cooccurrence` builds that matrix over the
+processor's retained vocabulary, so the graph, the counts, and the trained
+embeddings share one concept index.
 
 API Reference
 -------------

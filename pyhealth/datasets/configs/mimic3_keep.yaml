@@ -1,0 +1,24 @@
+version: "1.4"
+tables:
+  patients:
+    file_path: "PATIENTS.csv.gz"
+    patient_id: "subject_id"
+    timestamp: null
+    attributes: []
+  admissions:
+    file_path: "ADMISSIONS.csv.gz"
+    patient_id: "subject_id"
+    timestamp: "admittime"
+    timestamp_format: "%Y-%m-%d %H:%M:%S"
+    attributes: ["hadm_id"]
+  icustays:
+    file_path: "ICUSTAYS.csv.gz"
+    patient_id: "subject_id"
+    timestamp: "intime"
+    timestamp_format: "%Y-%m-%d %H:%M:%S"
+    attributes: []
+  diagnoses_icd:
+    file_path: "DIAGNOSES_ICD.csv.gz"
+    patient_id: "subject_id"
+    timestamp: null
+    attributes: ["row_id", "hadm_id", "icd9_code"]
