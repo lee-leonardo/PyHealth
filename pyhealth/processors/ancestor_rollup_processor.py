@@ -1,9 +1,8 @@
 # Author: lee-leonardo (NetID: ll37)
 # Description: KEEP depth-limited ancestor roll-up as a PyHealth processor.
 #   Maps observed concept codes to retained SNOMED ancestors and projects the
-#   successful paths into one PyG graph per sample. The OMOP vocabulary
-#   adapter (``from_omop``) integrates the reader from PR #2
-#   (``pyhealth.medcode.omop``); the roll-up policies are inspired by KEEP
+#   successful paths into one PyG graph per sample. The roll-up policies
+#   are inspired by KEEP
 #   (Elhussein et al., CHIL 2025,
 #   https://arxiv.org/abs/2510.05049) and were rehearsed and validated
 #   against a standalone behavioural reference before this port.
@@ -23,8 +22,8 @@ Two entry points build the same internal roll-up index:
   :class:`~pyhealth.graph.KnowledgeGraph` (its ``edge_index``,
   ``edge_type`` and ID maps), a domain mapping, and optional authoritative
   root depths;
-- :meth:`AncestorRollupProcessor.from_omop` builds a KnowledgeGraph from the
-  OMOP vocabulary reader of PR #2 (:class:`~pyhealth.medcode.OMOPVocabulary`):
+- :func:`~pyhealth.tasks.keep.build_keep_omop_ancestor_rollup` builds a
+  KnowledgeGraph from :class:`~pyhealth.medcode.OMOPVocabulary`:
   the uncut SNOMED condition subtree supplies the traversal edges and the
   closure-derived root depths, and the classification universe is every
   valid standard SNOMED concept with its domain.
@@ -104,10 +103,6 @@ FAILURE_REASONS = ("unknown_code", "outside_domain", "unreachable", "no_target")
 
 #: The only reasons whose sources count as mapped observed codes.
 MAPPED_REASONS = ("retained", "rolled_up")
-
-#: Relation name used for the OMOP hierarchy edges (matches
-#: ``ConditionHierarchy.to_triples``).
-OMOP_HIERARCHY_RELATION = "is_a"
 
 # --- provenance vocabulary recorded on every processor -----------------------
 
@@ -288,7 +283,7 @@ def _validated_pairs(pairs: Any, name: str) -> frozenset[tuple[str, str]]:
 
 
 def _reject_cycles(
-    nodes: dict[str, str], children: dict[str, tuple], parents: dict
+    nodes: Iterable[str], children: dict[str, tuple], parents: dict
 ) -> None:
     """Kahn's algorithm over every node; reject cycles anywhere in the graph."""
     indegree = {code: len(parents.get(code, ())) for code in nodes}
@@ -301,7 +296,7 @@ def _reject_cycles(
             indegree[child] -= 1
             if indegree[child] == 0:
                 queue.append(child)
-    if processed == len(nodes):
+    if processed == len(indegree):
         return
     remaining = {code for code, degree in indegree.items() if degree > 0}
     cycle = _find_cycle(remaining, parents)
@@ -346,7 +341,7 @@ def _bfs_root_depths(root: str, children: Mapping[str, tuple]) -> dict[str, int]
 
 
 def _supplied_root_depths(
-    root_depths: Any, domain_by_code: Mapping[str, str], root: str
+    root_depths: Any, entity2id: Mapping[str, int], root: str
 ) -> dict[str, int]:
     """Validate and adopt caller-supplied authoritative root distances.
 
@@ -359,7 +354,7 @@ def _supplied_root_depths(
     depths: dict[str, int] = {}
     for code, distance in root_depths.items():
         _require_nonempty_str(code, "root_depths key")
-        if code not in domain_by_code:
+        if code not in entity2id:
             raise ValueError(f"root_depths contains unknown code {code!r}")
         depths[code] = _require_nonnegative_int(distance, f"root_depths[{code!r}]")
     if root not in depths:
@@ -456,15 +451,15 @@ class AncestorRollupProcessor(FeatureProcessor):
     retained ancestors (multiple targets preserved); failures carry one of
     four diagnostic reasons and honour ``on_unmapped``.
 
-    The hierarchy comes from either a :class:`~pyhealth.graph.KnowledgeGraph`
-    (generic constructor) or the OMOP vocabulary reader
-    (:meth:`from_omop`). Hierarchy edges point parent -> child: triples of
-    the named ``hierarchy_relation`` are consumed as ``(parent, relation,
-    child)``, so orientation is the caller's responsibility. Note that
+    The processor consumes a :class:`~pyhealth.graph.KnowledgeGraph`.
+    Hierarchy edges point parent -> child. Triples of the named
+    ``hierarchy_relation`` are consumed as ``(parent, relation, child)``.
+    The caller supplies this orientation.
     :meth:`pyhealth.medcode.ConditionHierarchy.to_triples` emits
     ``(child, relation, parent)`` triples; reverse them before feeding them
-    to a generic processor, or use :meth:`from_omop`, which reads the
-    hierarchy's parent -> child edges directly.
+    to a generic processor. The KEEP factory
+    :func:`~pyhealth.tasks.keep.build_keep_omop_ancestor_rollup` reads the
+    vocabulary's parent -> child edges directly.
 
     Notes:
         **Depth semantics.** ``max_depth`` is the maximum permitted minimum
@@ -511,8 +506,8 @@ class AncestorRollupProcessor(FeatureProcessor):
             ``hierarchy_relation`` become hierarchy edges, consumed as
             (parent, relation, child).
         domain_by_code: mapping of every graph entity to its domain ID.
-            Entities missing from it fail construction; extra entries are
-            ignored.
+            Entities missing from it fail construction. Extra codes are
+            used for classification when include_external_codes is enabled.
         hierarchy_relation: the named direct relation that defines the
             hierarchy; must exist in the graph.
         root: the structural root code; must be an entity in the eligible
@@ -533,8 +528,11 @@ class AncestorRollupProcessor(FeatureProcessor):
         path_source: ``"direct"`` (default) or ``"closure"``; see Notes.
         closure_pairs: optional iterable of ``(parent, child)`` pairs from a
             closure/ancestor table, required when ``path_source="closure"``
-            on this constructor. :meth:`from_omop` fills them from the
-            vocabulary.
+            on this constructor.
+        include_external_codes: keep domain entries for codes outside the
+            graph for classification. Defaults to false.
+        loader_provenance: optional string metadata from the graph builder.
+            Defaults to the graph relation and entity count.
 
     Raises:
         TypeError: wrong argument types, a knowledge graph missing the
@@ -586,6 +584,9 @@ class AncestorRollupProcessor(FeatureProcessor):
         root_depths: Mapping[str, int] | None = None,
         path_source: str = "direct",
         closure_pairs: Iterable[tuple[str, str]] | None = None,
+        *,
+        include_external_codes: bool = False,
+        loader_provenance: Mapping[str, str] | None = None,
     ) -> None:
         for attribute in (
             "entity2id",
@@ -619,210 +620,20 @@ class AncestorRollupProcessor(FeatureProcessor):
                 "domain_by_code is missing domains for entities: "
                 + ", ".join(missing[:5])
             )
-        nodes = {
-            entity: {"domain_id": domain_by_code[entity]}
-            for entity in knowledge_graph.entity2id
-        }
-
-        self._initialize(
-            nodes=nodes,
-            closure_pairs=closure_pairs,
-            config=_RollupConfig(
-                root=root,
-                target_policy=target_policy,
-                include_root=include_root,
-                max_depth=max_depth,
-                on_unmapped=on_unmapped,
-                path_source=path_source,
-            ),
-            root_depths=root_depths,
-            loader_provenance={
+        _require_bool(include_external_codes, "include_external_codes")
+        domains = (
+            dict(domain_by_code)
+            if include_external_codes
+            else {code: domain_by_code[code] for code in knowledge_graph.entity2id}
+        )
+        if loader_provenance is None:
+            loader_provenance = {
                 "hierarchy_relation": self.hierarchy_relation,
                 "knowledge_graph_entities": str(len(knowledge_graph.entity2id)),
-            },
-        )
+            }
 
-    # -- OMOP factory -------------------------------------------------------
-
-    @classmethod
-    def from_omop(
-        cls,
-        vocabulary: Any,
-        *,
-        target_policy: str,
-        include_root: bool,
-        max_depth: int = 5,
-        on_unmapped: str = "error",
-        path_source: str = "direct",
-        node_features_by_code: Mapping[str, torch.Tensor] | None = None,
-    ) -> AncestorRollupProcessor:
-        """Builds a processor from the OMOP vocabulary (PR #2 adapter).
-
-        The vocabulary supplies concept metadata and relationships. The uncut
-        SNOMED condition subtree (``condition_hierarchy(max_depth=None,
-        depth_measure="min")``, rooted at Disease, concept 4274025) supplies
-        the traversal edges and the closure-derived root depths, which are
-        authoritative following KEEP appendix A.1.1. The processor's
-        ``max_depth`` then governs *target eligibility* over that uncut
-        subtree, so deep sources and intermediates stay traversable — the
-        same number as the hierarchy's build-time cutoff, but a different
-        layer. For the embedding stage, choose the training vocabulary
-        explicitly and supply trained vectors by concept code for projection.
-
-        The classification universe is every valid standard SNOMED concept
-        with its domain, so ``unknown_code`` (not a valid standard SNOMED
-        concept), ``outside_domain`` (SNOMED concept outside ``Condition``)
-        and ``unreachable`` (Condition concept outside the Disease subtree)
-        stay distinct. Concept codes are OMOP ``concept_id`` strings at the
-        processor boundary. Decode projected ``node_ids`` through the graph's
-        ``id2entity`` lookup.
-
-        Orphan-rescue shortcuts (the reader's ``connect_orphans`` edges) are
-        *not* used: the baseline builds paths from the direct ``Is a`` rows
-        plus, under ``path_source="closure"``, the separation-one
-        ``CONCEPT_ANCESTOR`` pairs. Whether processor traversal should also
-        follow rescue shortcuts is deferred; the reader's hierarchy export
-        keeps them available for other consumers.
-
-        Args:
-            vocabulary: an :class:`~pyhealth.medcode.OMOPVocabulary` pointed
-                at an unzipped Athena download.
-            target_policy: ``"first_retained"`` or ``"all_retained"``.
-            include_root: whether the Disease root may appear as a target.
-            max_depth: roll-up cutoff in minimum closure levels from the
-                root (eligibility, not hierarchy truncation). Default 5.
-            on_unmapped: ``"error"`` or ``"empty"``. Default ``"error"``.
-            path_source: ``"direct"`` or ``"closure"``; see the class
-                documentation.
-            node_features_by_code: Optional pretrained vectors keyed by the
-                string OMOP concept ID. Vectors must share a shape, dtype
-                and device. Traversal entities without vectors receive zeros.
-
-        Returns:
-            A configured :class:`AncestorRollupProcessor` with a
-            KnowledgeGraph over the uncut Disease subtree.
-
-        Raises:
-            TypeError: ``vocabulary`` is not an
-                :class:`~pyhealth.medcode.OMOPVocabulary`.
-            ValueError: invalid configuration values, or invalid hierarchy
-                structure in the selected edge set.
-
-        Example:
-            >>> from pyhealth.medcode import OMOPVocabulary
-            >>> from pyhealth.processors import AncestorRollupProcessor
-            >>> vocabulary = OMOPVocabulary("~/data/athena")  # doctest: +SKIP
-            >>> processor = AncestorRollupProcessor.from_omop(
-            ...     vocabulary, target_policy="first_retained",
-            ...     include_root=False, max_depth=5,
-            ... )  # doctest: +SKIP
-            >>> mapper = vocabulary.icd_mapper()  # doctest: +SKIP
-            >>> concept_ids = mapper.map("I214", version=10)  # doctest: +SKIP
-            >>> processor.rollup_codes([str(concept_ids[0])])  # doctest: +SKIP
-            [RollupResult(source='4140231', targets=('4140231',), ...)]
-        """
-        from pyhealth.graph import KnowledgeGraph
-        from pyhealth.medcode import OMOPVocabulary
-
-        if not isinstance(vocabulary, OMOPVocabulary):
-            raise TypeError(
-                "vocabulary must be an OMOPVocabulary, got "
-                f"{type(vocabulary).__name__}"
-            )
-        import polars as pl
-
-        # The uncut subtree: the processor's max_depth governs target
-        # eligibility over it, so no build-time truncation here. KEEP's
-        # depth measure ("min") is pinned; "max" stays the reader's option.
-        # No orphan rescue: the deferral is documented above.
-        hierarchy = vocabulary.condition_hierarchy(
-            max_depth=None, depth_measure="min", connect_orphans=False
-        )
-        # Classification universe: every valid standard SNOMED concept, all
-        # domains (mirrors the reader's own validity/standard filters).
-        universe = (
-            vocabulary.scan("CONCEPT")
-            .filter(
-                (pl.col("vocabulary_id") == "SNOMED")
-                & (pl.col("standard_concept") == "S")
-                & (
-                    pl.col("invalid_reason").is_null()
-                    | (pl.col("invalid_reason").str.strip_chars() == "")
-                )
-            )
-            .select("concept_id", "domain_id")
-            .collect(engine="streaming")
-        )
-        nodes = {
-            str(concept_id): {"domain_id": domain_id}
-            for concept_id, domain_id in universe.iter_rows()
-        }
-        root = str(hierarchy.root_concept_id)
-        if root not in nodes:
-            raise ValueError(
-                f"the hierarchy root {root!r} is not a valid standard SNOMED "
-                "concept in this vocabulary"
-            )
-        direct_edges = [
-            (str(parent), str(child))
-            for parent, child in hierarchy.edges.select(
-                "parent_id", "child_id"
-            ).iter_rows()
-        ]
-        closure_pairs = None
-        if path_source == "closure":
-            separation_one = hierarchy.ancestors.filter(
-                pl.col("distance") == 1
-            )
-            closure_pairs = [
-                (str(ancestor), str(descendant))
-                for descendant, ancestor in separation_one.select(
-                    "concept_id", "ancestor_id"
-                ).iter_rows()
-            ]
-        root_depths = {
-            str(concept_id): int(depth)
-            for concept_id, depth in hierarchy.nodes.select(
-                "concept_id", "depth"
-            ).iter_rows()
-        }
-        # Explicit IDs retain concepts whose incoming edges were filtered out.
-        entity2id = {code: index for index, code in enumerate(sorted(root_depths))}
-        node_features = None
-        if node_features_by_code is not None:
-            _require_mapping(node_features_by_code, "node_features_by_code")
-            for code, vector in node_features_by_code.items():
-                if code not in entity2id:
-                    raise ValueError(
-                        f"Node features supplied for unknown entity {code!r}"
-                    )
-                if not isinstance(vector, torch.Tensor) or vector.ndim != 1:
-                    raise ValueError(
-                        "Each node feature must be a one-dimensional tensor"
-                    )
-                if node_features is None:
-                    node_features = vector.new_zeros(len(entity2id), vector.numel())
-                if (
-                    vector.shape != node_features.shape[1:]
-                    or vector.dtype != node_features.dtype
-                    or vector.device != node_features.device
-                ):
-                    raise ValueError(
-                        "Node features must share a shape, dtype and device"
-                    )
-                node_features[entity2id[code]] = vector.detach()
-        relation = OMOP_HIERARCHY_RELATION
-        knowledge_graph = KnowledgeGraph(
-            triples=[(parent, relation, child) for parent, child in direct_edges],
-            entity2id=entity2id,
-            relation2id={relation: 0},
-            node_features=node_features,
-        )
-        processor = cls.__new__(cls)
-        processor.knowledge_graph = knowledge_graph
-        processor.hierarchy_relation = relation
-        processor._initialize(
-            nodes=nodes,
+        self._initialize(
+            domain_by_code=domains,
             closure_pairs=closure_pairs,
             config=_RollupConfig(
                 root=root,
@@ -833,47 +644,19 @@ class AncestorRollupProcessor(FeatureProcessor):
                 path_source=path_source,
             ),
             root_depths=root_depths,
-            loader_provenance={
-                "hierarchy_relation": OMOP_HIERARCHY_RELATION,
-                "vocabulary_source": "pyhealth.medcode.OMOPVocabulary",
-                "hierarchy_root": str(hierarchy.root_concept_id),
-                "depth_measure": hierarchy.depth_measure,
-                "hierarchy_max_depth": "None (uncut subtree)",
-                "rescued_edges": "0 (orphan rescue deferred)",
-            },
+            loader_provenance=loader_provenance,
         )
-        return processor
-
-    # -- shared construction tail --------------------------------------------
 
     def _initialize(
         self,
         *,
-        nodes: Mapping[str, Mapping[str, str]],
+        domain_by_code: dict[str, str],
         closure_pairs: Iterable[tuple[str, str]] | None,
         config: _RollupConfig,
         root_depths: Mapping[str, int] | None,
         loader_provenance: Mapping[str, str],
     ) -> None:
-        """Validates inputs and builds the internal roll-up index.
-
-        Both the generic constructor and :meth:`from_omop` end here, so the
-        two entry points build the very same index.
-        """
-        _require_mapping(nodes, "nodes")
-        domain_by_code: dict[str, str] = {}
-        for code, metadata in nodes.items():
-            _require_nonempty_str(code, "node code")
-            _require_mapping(metadata, f"metadata for node {code!r}")
-            if "domain_id" not in metadata:
-                raise ValueError(
-                    f"node {code!r} metadata is missing the required "
-                    "'domain_id' key"
-                )
-            domain_by_code[code] = _require_nonempty_str(
-                metadata["domain_id"], f"domain_id for node {code!r}"
-            )
-
+        """Validate and index the configured hierarchy."""
         graph = self.knowledge_graph
         entity2id = {
             code: int(entity_id) for code, entity_id in graph.entity2id.items()
@@ -893,8 +676,7 @@ class AncestorRollupProcessor(FeatureProcessor):
             if closure_pairs is None:
                 raise ValueError(
                     "path_source='closure' requires closure_pairs (pairs "
-                    "from a closure/ancestor table); from_omop supplies "
-                    "them from CONCEPT_ANCESTOR"
+                    "from a closure/ancestor table)"
                 )
             closure = _validated_pairs(closure_pairs, "closure_pairs")
             selected = direct | closure
@@ -910,12 +692,12 @@ class AncestorRollupProcessor(FeatureProcessor):
         children_lists: dict[str, list] = {}
         parents_lists: dict[str, list] = {}
         for parent, child in selected:
-            if parent not in domain_by_code:
+            if parent not in entity2id:
                 raise ValueError(
                     f"hierarchy edge ({parent!r}, {child!r}) references an "
                     "unknown parent code"
                 )
-            if child not in domain_by_code:
+            if child not in entity2id:
                 raise ValueError(
                     f"hierarchy edge ({parent!r}, {child!r}) references an "
                     "unknown child code"
@@ -934,9 +716,9 @@ class AncestorRollupProcessor(FeatureProcessor):
             code: tuple(sorted(neighbours))
             for code, neighbours in parents_lists.items()
         }
-        _reject_cycles(domain_by_code, children, parents)
+        _reject_cycles(entity2id, children, parents)
 
-        if config.root not in domain_by_code:
+        if config.root not in entity2id:
             raise ValueError(
                 f"configured root {config.root!r} is not present in nodes"
             )
@@ -953,7 +735,7 @@ class AncestorRollupProcessor(FeatureProcessor):
             depth_method = _DEPTH_METHOD_BFS
             root_depths_count = 0
         else:
-            supplied = _supplied_root_depths(root_depths, domain_by_code, config.root)
+            supplied = _supplied_root_depths(root_depths, entity2id, config.root)
             depths = supplied
             depth_method = _DEPTH_METHOD_SUPPLIED
             root_depths_count = len(depths)

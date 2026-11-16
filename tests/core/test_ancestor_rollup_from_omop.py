@@ -1,4 +1,4 @@
-"""Tests for AncestorRollupProcessor.from_omop on a synthetic Athena bundle.
+"""Tests for build_keep_omop_ancestor_rollup on a synthetic Athena bundle.
 
 The bundle follows the layout of ``test_omop_vocabulary.py`` (tab-separated
 ``.csv`` files) and adds the row-level signature of the Athena discrepancy
@@ -43,7 +43,7 @@ import torch
 
 from pyhealth.graph import KnowledgeGraph
 from pyhealth.medcode import DISEASE_CONCEPT_ID, OMOPVocabulary
-from pyhealth.processors import AncestorRollupProcessor
+from pyhealth.tasks import build_keep_omop_ancestor_rollup
 
 ROOT = DISEASE_CONCEPT_ID
 
@@ -198,7 +198,7 @@ class _AthenaRollupFixture(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp()
         write_athena_bundle(cls.tmp)
         cls.vocab = OMOPVocabulary(cls.tmp)
-        cls.direct = AncestorRollupProcessor.from_omop(
+        cls.direct = build_keep_omop_ancestor_rollup(
             cls.vocab,
             target_policy="first_retained",
             include_root=False,
@@ -206,7 +206,7 @@ class _AthenaRollupFixture(unittest.TestCase):
             on_unmapped="empty",
             path_source="direct",
         )
-        cls.closure = AncestorRollupProcessor.from_omop(
+        cls.closure = build_keep_omop_ancestor_rollup(
             cls.vocab,
             target_policy="first_retained",
             include_root=False,
@@ -214,7 +214,7 @@ class _AthenaRollupFixture(unittest.TestCase):
             on_unmapped="empty",
             path_source="closure",
         )
-        cls.all_retained = AncestorRollupProcessor.from_omop(
+        cls.all_retained = build_keep_omop_ancestor_rollup(
             cls.vocab,
             target_policy="all_retained",
             include_root=False,
@@ -272,7 +272,7 @@ class TestFromOmopClassification(_AthenaRollupFixture):
             self.direct.rollup_codes([""])
 
     def test_default_configuration(self):
-        processor = AncestorRollupProcessor.from_omop(
+        processor = build_keep_omop_ancestor_rollup(
             self.vocab,
             target_policy="first_retained",
             include_root=False,
@@ -381,7 +381,7 @@ class TestPathSourceModes(_AthenaRollupFixture):
 
     @unittest.skipUnless(_has_pyg(), "torch-geometric not installed")
     def test_icd_to_graph_embeddings_keeps_untrained_nodes(self):
-        processor = AncestorRollupProcessor.from_omop(
+        processor = build_keep_omop_ancestor_rollup(
             self.vocab,
             target_policy="first_retained",
             include_root=False,
@@ -537,7 +537,7 @@ class TestICDEventMapping(_AthenaRollupFixture):
 class TestFromOmopValidation(_AthenaRollupFixture):
     def test_rejects_non_vocabulary_input(self):
         with self.assertRaises(TypeError):
-            AncestorRollupProcessor.from_omop(
+            build_keep_omop_ancestor_rollup(
                 "not-a-vocabulary",
                 target_policy="first_retained",
                 include_root=False,
@@ -545,13 +545,13 @@ class TestFromOmopValidation(_AthenaRollupFixture):
 
     def test_configuration_validated(self):
         with self.assertRaises(ValueError):
-            AncestorRollupProcessor.from_omop(
+            build_keep_omop_ancestor_rollup(
                 self.vocab,
                 target_policy="nearest",
                 include_root=False,
             )
         with self.assertRaises(ValueError):
-            AncestorRollupProcessor.from_omop(
+            build_keep_omop_ancestor_rollup(
                 self.vocab,
                 target_policy="first_retained",
                 include_root=False,
@@ -566,7 +566,7 @@ class TestFromOmopValidation(_AthenaRollupFixture):
         )
 
     def test_fingerprint_distinguishes_configurations(self):
-        shallower = AncestorRollupProcessor.from_omop(
+        shallower = build_keep_omop_ancestor_rollup(
             self.vocab,
             target_policy="first_retained",
             include_root=False,
@@ -575,7 +575,7 @@ class TestFromOmopValidation(_AthenaRollupFixture):
         )
         self.assertNotEqual(self.direct.fingerprint, shallower.fingerprint)
         self.assertNotEqual(self.direct.fingerprint, self.closure.fingerprint)
-        twin = AncestorRollupProcessor.from_omop(
+        twin = build_keep_omop_ancestor_rollup(
             self.vocab,
             target_policy="first_retained",
             include_root=False,

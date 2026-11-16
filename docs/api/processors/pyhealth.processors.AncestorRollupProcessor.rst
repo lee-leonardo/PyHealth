@@ -27,7 +27,8 @@ Two entry points build the same internal roll-up index:
 - the generic constructor takes a :class:`~pyhealth.graph.KnowledgeGraph`
   whose ``hierarchy_relation`` triples are supplied **parent -> child**, a
   domain mapping, and optionally authoritative root depths and closure pairs;
-- :meth:`~pyhealth.processors.AncestorRollupProcessor.from_omop` converts
+- :func:`~pyhealth.tasks.keep.build_keep_omop_ancestor_rollup`
+  converts
   the uncut SNOMED Disease subtree from
   :class:`~pyhealth.medcode.OMOPVocabulary` to a PyHealth KnowledgeGraph.
   Its direct edges point parent to child. Minimum ``CONCEPT_ANCESTOR``
@@ -141,10 +142,10 @@ own result, and converging targets within one event count once:
 .. code-block:: python
 
     from pyhealth.medcode import OMOPVocabulary
-    from pyhealth.processors import AncestorRollupProcessor
+    from pyhealth.tasks import build_keep_omop_ancestor_rollup
 
     vocabulary = OMOPVocabulary("~/data/athena")
-    processor = AncestorRollupProcessor.from_omop(
+    processor = build_keep_omop_ancestor_rollup(
         vocabulary, target_policy="first_retained",
         include_root=False, max_depth=5,
     )
@@ -182,7 +183,7 @@ with rows aligned to ``entity2id``. For OMOP, pass the vectors by string
 
     import torch
 
-    embedded = AncestorRollupProcessor.from_omop(
+    embedded = build_keep_omop_ancestor_rollup(
         vocabulary,
         target_policy="first_retained",
         include_root=True,

@@ -225,6 +225,24 @@ class TestConstruction(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_processor(root="NOPE")
 
+    def test_external_domains_classify_without_adding_graph_entities(self):
+        domains = dict(DIAMOND_KG_DOMAINS, EXT="Condition", DRUG="Drug")
+        _, default = build_processor(domains=domains)
+        self.assertEqual(default.rollup_codes(["EXT"])[0].reason, "unknown_code")
+
+        options = {"domains": domains, "include_external_codes": True}
+        _, processor = build_processor(**options)
+        results = processor.rollup_codes(["EXT", "DRUG"])
+        self.assertEqual([r.reason for r in results], ["unreachable", "outside_domain"])
+        self.assertEqual(processor.id2entity, default.id2entity)
+
+        with self.assertRaisesRegex(ValueError, "unknown code 'EXT'"):
+            build_processor(**options, root_depths={"R": 0, "EXT": 1})
+        with self.assertRaisesRegex(ValueError, "unknown child code"):
+            build_processor(
+                **options, path_source="closure", closure_pairs=[("R", "EXT")]
+            )
+
     def test_configuration_validated(self):
         with self.assertRaises(ValueError):
             build_processor(target_policy="nearest")

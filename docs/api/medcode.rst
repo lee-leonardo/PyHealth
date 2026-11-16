@@ -372,7 +372,4 @@ The example below builds a three-concept hierarchy by hand; it needs
     :show-inheritance:
 
 To roll conditions up to retained ancestors and project the paths into
-per-sample graphs, see
-:doc:`processors/pyhealth.processors.AncestorRollupProcessor` — its
-``from_omop`` factory builds on the vocabulary reader, hierarchy, and mapper
-documented here.
+per-sample graphs, use :func:`~pyhealth.tasks.keep.build_keep_omop_ancestor_rollup`.
