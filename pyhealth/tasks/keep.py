@@ -838,7 +838,7 @@ class KeepConditionHistoryTask(BaseTask):
         >>> histories = dataset.set_task(task)  # doctest: +SKIP
     """
 
-    task_name = "keep_condition_history_v1"
+    task_name = "keep_condition_history_v2"
     input_schema: ClassVar = {"conditions": "raw"}
     output_schema: ClassVar = {}
 
@@ -881,8 +881,14 @@ class KeepConditionHistoryTask(BaseTask):
                 code, version = _text(event.icd9_code), "9"
             else:
                 seq_num = _text(event.seq_num)
-                diagnosis_id = f"{visit_id}:{seq_num}" if visit_id and seq_num else None
                 code, version = _text(event.icd_code), _text(event.icd_version)
+                diagnosis_id = (
+                    json.dumps(
+                        (visit_id, seq_num, code, version), separators=(",", ":")
+                    )
+                    if visit_id is not None and seq_num is not None
+                    else None
+                )
             if diagnosis_id is None:
                 raise ValueError("MIMIC diagnosis is missing its occurrence identity")
             prefix = _ICD_PREFIX.get(version)

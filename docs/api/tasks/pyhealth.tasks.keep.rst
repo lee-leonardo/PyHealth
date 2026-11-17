@@ -46,6 +46,25 @@ times. The task caches one raw history per patient and preserves every
 standard Condition concept mapped from each diagnosis. Its cohort method
 passes those IDs directly to roll-up.
 
+Within a patient, MIMIC-III uses ``row_id`` and MIMIC-IV uses
+``(hadm_id, seq_num, icd_code, icd_version)`` to identify a diagnosis.
+Exact copies collapse. Distinct MIMIC-IV keys survive even if their ICD
+codes map to the same concepts. A missing code or version keeps its
+unmapped diagnostic. Treat the resulting ``diagnosis_id`` as an opaque
+string. The ``keep_condition_history_v2`` task rebuilds histories in a
+separate cache and can reuse normalized dataset events.
+
+Run the two synthetic examples from the checkout.
+
+.. code-block:: console
+
+    python -m examples.mimic3_keep_cooccurrence_matrix
+    python -m examples.mimic4_keep_cooccurrence_matrix
+
+Each example prints mapped patient histories before computing the matrix.
+The MIMIC-III example shows distinct rows for the same ICD-9 code. The
+MIMIC-IV example shows distinct codes with the same admission and sequence.
+
 .. code-block:: python
 
     from functools import partial
