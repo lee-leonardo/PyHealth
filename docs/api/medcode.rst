@@ -370,3 +370,6 @@ The example below builds a three-concept hierarchy by hand; it needs
 .. autoclass:: pyhealth.medcode.ICDToSNOMEDMapper
     :members:
     :show-inheritance:
+
+To roll conditions up to retained ancestors and project the paths into
+per-sample graphs, use :func:`~pyhealth.tasks.keep.build_keep_omop_ancestor_rollup`.
