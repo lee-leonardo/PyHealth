@@ -1,0 +1,24 @@
+version: "2.2"
+tables:
+  patients:
+    file_path: "hosp/patients.csv.gz"
+    patient_id: "subject_id"
+    timestamp: null
+    attributes: []
+  admissions:
+    file_path: "hosp/admissions.csv.gz"
+    patient_id: "subject_id"
+    timestamp: "admittime"
+    timestamp_format: "%Y-%m-%d %H:%M:%S"
+    attributes: ["hadm_id"]
+  icustays:
+    file_path: "icu/icustays.csv.gz"
+    patient_id: "subject_id"
+    timestamp: "intime"
+    timestamp_format: "%Y-%m-%d %H:%M:%S"
+    attributes: []
+  diagnoses_icd:
+    file_path: "hosp/diagnoses_icd.csv.gz"
+    patient_id: "subject_id"
+    timestamp: null
+    attributes: ["hadm_id", "seq_num", "icd_code", "icd_version"]

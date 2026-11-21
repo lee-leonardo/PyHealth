@@ -136,3 +136,4 @@ API Reference
     :maxdepth: 3
 
     graph/pyhealth.graph.KnowledgeGraph
+    graph/pyhealth.graph.cooccurrence
