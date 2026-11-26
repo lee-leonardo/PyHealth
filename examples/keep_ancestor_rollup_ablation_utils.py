@@ -296,7 +296,7 @@ def jsd(left, right):
     if not a or not b:
         return None
     result = 0.0
-    for key in left.keys() | right.keys():
+    for key in sorted(left.keys() | right.keys()):
         p, q = left.get(key, 0) / a, right.get(key, 0) / b
         m = (p + q) / 2
         result += (
